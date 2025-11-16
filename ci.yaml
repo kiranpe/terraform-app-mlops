@@ -1,0 +1,75 @@
+name: terraform-ci
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  terraform:
+    runs-on: ubuntu-latest
+
+    permissions:
+      id-token: write    # <-- needed for OIDC
+      contents: read
+
+    env:
+      GCP_PROJECT_ID: "mlops-448320"
+      GCP_PROJECT_NUMBER: "10159280936"
+      GCP_WIF_POOL: "ado-pool"        # or 'github-pool' if you create a new one
+      GCP_WIF_PROVIDER: "ado-provider" # or 'github-provider'
+      GSA_EMAIL: "ado-runner-dev@mlops-448320.iam.gserviceaccount.com"
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      # 1) Authenticate to GCP via Workload Identity Federation
+      - name: Auth to GCP (WIF)
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: >
+            projects/${{ env.GCP_PROJECT_NUMBER }}/locations/global/workloadIdentityPools/${{ env.GCP_WIF_POOL }}/providers/${{ env.GCP_WIF_PROVIDER }}
+          service_account: ${{ env.GSA_EMAIL }}
+          # Optional: limit to this repo / branch using attribute conditions on provider side
+
+      # 2) Setup gcloud
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ env.GCP_PROJECT_ID }}
+
+      # 3) Quick test – list buckets
+      - name: Test GCP access
+        run: |
+          echo "Active account:"
+          gcloud auth list
+          echo "Listing buckets (if permission granted):"
+          gcloud storage ls || echo "No storage permissions – check IAM roles on ${GSA_EMAIL}"
+
+      # 4) Setup Terraform (optional – if you want Terraform here)
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.5
+
+      # 5) Terraform init/plan (adjust path + backend config)
+      - name: Terraform init & plan
+        working-directory: .
+        run: |
+          terraform init \
+            -backend-config="bucket=my-tf-state-bucket" \
+            -backend-config="prefix=envs/dev"
+
+          terraform plan
+        env:
+          GOOGLE_PROJECT: ${{ env.GCP_PROJECT_ID }}
+
+      # 6) Terraform apply only on main (optional)
+      - name: Terraform apply (main only)
+        if: github.ref == 'refs/heads/main'
+        working-directory: .
+        run: |
+          terraform apply -auto-approve
